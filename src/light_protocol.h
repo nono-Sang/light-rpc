@@ -5,19 +5,16 @@
 
 namespace lightrpc {
 
-enum PollingMode {
-  EVENT_NOTIFY,
-  BUSY_POLLING
-};
+enum PollingMode { EVENT_NOTIFY, BUSY_POLLING };
 
-/// If the local_port is set to a negative number, 
+/// If the local_port is set to a negative number,
 /// the system will automatically allocate a port.
 struct ResourceConfig {
-  std::string local_ip;
-  int local_port;
-  int num_threads;
-  PollingMode poll_mode;
-  int block_pool_size;
+    std::string local_ip;
+    int local_port;
+    int num_threads;
+    PollingMode poll_mode;
+    int block_pool_size;
 };
 
 /**
@@ -45,5 +42,5 @@ const int req_fixed_len = sizeof(uint16_t);
 const int max_metadata_size = UINT16_MAX;
 /// Used to record the corresponding rpc id.
 const int res_head_len = sizeof(uint32_t);
-  
+
 } // namespace lightrpc
