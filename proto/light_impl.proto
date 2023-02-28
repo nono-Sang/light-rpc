@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package lightrpc;
+
+message RequestMetadata {
+  uint32 rpc_id = 1;
+  string service_name = 2;
+  string method_name = 3;
+}
