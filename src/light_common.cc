@@ -200,11 +200,14 @@ SharedResource::BlockPollWorkCompletion() {
         int res = 0;
         ibv_wc wc;
         while(true) {
-            res = ibv_poll_cq(shared_send_cq_, 1, &wc);
+            res = ibv_poll_cq(shared_cq, 1, &wc);
             if(res == 0)
                 break;
             CHECK(res == 1 && wc.status == IBV_WC_SUCCESS);
-            ProcessSendWorkCompletion(wc);
+            if (shared_cq == shared_send_cq_) 
+                ProcessSendWorkCompletion(wc);
+            else 
+                ProcessRecvWorkCompletion(wc);
             memset(&wc, 0, sizeof(wc));
         }
     };
