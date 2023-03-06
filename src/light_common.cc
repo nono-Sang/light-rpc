@@ -7,7 +7,7 @@ namespace lightrpc {
 
 SharedResource::SharedResource(ResourceConfig config)
     : config_(config), num_blocks_(config.block_pool_size / msg_threshold),
-      round_robin_idx_(0), addr_queue_(num_blocks_),
+      addr_queue_(num_blocks_), round_robin_idx_(0),
       processer_work_(processer_service_) {
     CreateControlID();
     BindLocalDevice();

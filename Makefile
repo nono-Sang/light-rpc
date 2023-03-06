@@ -22,7 +22,14 @@ build/client: $(PBOBJ) src/light_channel.o test/client.o
 
 # compile and generate dependency info
 %.o: %.cc
-	$(CXX) -c $(CFLAGS) $*.cc -o $*.o $(LIBFLAGS)
+	$(CXX) -c -fPIC $(CXXFLAGS) $*.cc -o $*.o $(LIBFLAGS)
+
+
+dynamic: liblightrpc.so
+member = $(wildcard proto/*.o src/*.o)
+liblightrpc.so: $(member)
+	$(CXX) -shared $^ -o $@
+
 
 # remove compilation products
 clean:

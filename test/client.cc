@@ -209,17 +209,18 @@ void SyncMultiThread(EchoService_Stub& stub, int msg_size,
 int main(int argc, char* argv[])
 {
   int num_cpus = std::thread::hardware_concurrency();
-  int num_threads = std::min(std::max(2, num_cpus / 4), 8);
+  std::cout << "Number of CPUs: " << num_cpus << std::endl;
   
   std::string local_ip;
   GetLocalIp(local_ip);
 
+  // int num_threads = std::min(std::max(2, num_cpus / 4), 8);
   lightrpc::ResourceConfig config = {
     .local_ip = local_ip,
     .local_port = -1,
     .num_threads = 1,
     .poll_mode = lightrpc::BUSY_POLLING,
-    .block_pool_size = 6 * 1024 * 1024 * 4
+    .block_pool_size = 6 * 1024 * 1024
   };
 
   std::string server_ip;
