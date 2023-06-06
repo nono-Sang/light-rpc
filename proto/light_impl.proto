@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package lightrpc;
+
+// request
+message RequestDescrip {
+  uint32 rpc_id = 1;
+  string service_name = 2;
+  string method_name = 3;
+}
+
+message RequestHead {
+  uint32 descrip_size = 1;
+};
+
+// control message
+message NotifyMessage {
+  uint32 rpc_id = 1;
+}
+
+message AuthorityHead {
+  uint32 authority_size = 1;
+}
+
+message AuthorityMessage {
+  uint32 rpc_id = 1;
+  uint32 remote_key = 2;
+  uint64 remote_addr = 3;
+};
+
+// response
+message ResponseHead {
+  uint32 rpc_id = 1;
+};
