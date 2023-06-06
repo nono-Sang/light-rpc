@@ -171,6 +171,9 @@ void LightServer::ParseRequest(ibv_qp *conn_qp, void *addr, uint32_t msg_len) {
   auto request = service->GetRequestPrototype(method).New();
   auto response = service->GetResponsePrototype(method).New();
 
+  uint32_t req_len = msg_len - max_uint32_field - descrip_len;
+  CHECK(request->ParseFromArray(msg_addr + max_uint32_field + descrip_len, req_len));
+
   // Release the occupied resources.
   if (msg_len <= msg_threshold) {
     ReturnOneBlock(reinterpret_cast<uint64_t>(msg_addr));
