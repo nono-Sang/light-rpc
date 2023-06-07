@@ -124,9 +124,11 @@ GlobalResource::~GlobalResource() {
 
 void GlobalResource::ObtainOneBlock(uint64_t &addr) {
   // Set non-blocking to blocking.
-  while (addr_queue_.pop(addr) == false) {
-    LOG_INFO("wait...");
+  if (!addr_queue_.pop(addr)) {
+    LOG_INFO("# Waiting for idle blocks.");
   }
+  while (addr_queue_.pop(addr) == false) {};
+  LOG_INFO("# Got an idle block.");
 }
 
 void GlobalResource::ReturnOneBlock(uint64_t addr) {
@@ -376,7 +378,7 @@ void GlobalResource::ProcessAuthorityMessage(uint64_t recv_addr, ibv_qp *conn_qp
   uint32_t auth_len = head.authority_size();
 
   AuthorityMessage authority_msg;
-  authority_msg.ParseFromArray(msg_addr + max_uint32_field, auth_len);
+  CHECK(authority_msg.ParseFromArray(msg_addr + max_uint32_field, auth_len));
 
   ReturnOneBlock(recv_addr);
   uint32_t rpc_id = authority_msg.rpc_id();
