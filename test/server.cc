@@ -13,12 +13,11 @@ class EchoServiceImpl : public EchoService {
             const TestRequest *request,
             TestResponse *response,
             google::protobuf::Closure *done) override {
-    std::string res_str(128, 'A');
-    response->set_response(res_str);
-    // response->set_response(request->request());
+    response->set_response(request->request());
     done->Run();
   }
 };
+
 
 int main(int argc, char *argv[]) {
   int num_cpus = std::thread::hardware_concurrency();
@@ -27,10 +26,11 @@ int main(int argc, char *argv[]) {
   std::string local_ip;
   GetLocalIp(local_ip);
 
+  int num_threads = std::min(std::max(2, num_cpus / 4), 8);
   lightrpc::ResourceConfig config = {.local_ip = local_ip,
                                      .local_port = 1024,
                                      .block_pool_size = 100 * 1024 * 1024,
-                                     .num_threads = num_cpus};
+                                     .num_threads = num_threads};
 
   lightrpc::LightServer server(config);
   EchoServiceImpl echo_service;

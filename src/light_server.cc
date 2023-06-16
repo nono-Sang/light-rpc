@@ -112,6 +112,7 @@ void LightServer::ProcessRecvWorkCompletion(ibv_wc &wc) {
   int goal_thread_id = SelectTargetThread();
   auto thread_id = thread_pool_[goal_thread_id].get_id();
   thread_info_map_[thread_id]->IncTotalCount();
+  // std::cout << goal_thread_id << std::endl;
 
   uint32_t imm_data = ntohl(wc.imm_data);
   uint64_t recv_addr = wc.wr_id;
@@ -153,12 +154,9 @@ void LightServer::ParseRequest(ibv_qp *conn_qp, void *addr, uint32_t msg_len) {
     msg_addr = reinterpret_cast<char *>(mr->addr);
   }
 
-  RequestHead head;
-  head.ParseFromArray(msg_addr, max_uint32_field);  // no check
-  uint32_t descrip_len = head.descrip_size();
-
+  uint32_t descrip_len = atoll(msg_addr);
   RequestDescrip descrip;
-  CHECK(descrip.ParseFromArray(msg_addr + max_uint32_field, descrip_len));
+  CHECK(descrip.ParseFromArray(msg_addr + max_length_digit, descrip_len));
   uint32_t rpc_id = descrip.rpc_id();
   std::string service_name = descrip.service_name();
   std::string method_name = descrip.method_name();
@@ -171,8 +169,8 @@ void LightServer::ParseRequest(ibv_qp *conn_qp, void *addr, uint32_t msg_len) {
   auto request = service->GetRequestPrototype(method).New();
   auto response = service->GetResponsePrototype(method).New();
 
-  uint32_t req_len = msg_len - max_uint32_field - descrip_len;
-  CHECK(request->ParseFromArray(msg_addr + max_uint32_field + descrip_len, req_len));
+  uint32_t req_len = msg_len - max_length_digit - descrip_len;
+  CHECK(request->ParseFromArray(msg_addr + max_length_digit + descrip_len, req_len));
 
   // Release the occupied resources.
   if (msg_len <= msg_threshold) {
@@ -196,23 +194,19 @@ void LightServer::ReturnResponse(CallBackArgs args) {
   std::unique_ptr<google::protobuf::Message> request_guard(args.request);
   std::unique_ptr<google::protobuf::Message> response_guard(args.response);
 
-  // Message Layout: ResponseHead | ResponseBody
+  // Message Layout: rpc_id | ResponseBody
   uint32_t res_len = args.response->ByteSizeLong();
-  uint32_t head_len = max_uint32_field;
-
   // The total length of the message to be sent.
-  uint32_t msg_len = head_len + res_len;
-
-  ResponseHead head;
-  head.set_rpc_id(args.rpc_id);
+  uint32_t msg_len = max_length_digit + res_len;
 
   // Define the serialization lambda function.
   char *msg_buf = nullptr;
   auto serialize_func = [&] {
     msg_buf = reinterpret_cast<char *>(mi_malloc(msg_len));
     CHECK(msg_buf != nullptr);
-    CHECK(head.SerializeToArray(msg_buf, head_len));
-    CHECK(args.response->SerializeToArray(msg_buf + head_len, res_len));
+    auto id_str = std::to_string(args.rpc_id) + '\0';
+    memcpy(msg_buf, id_str.c_str(), id_str.size());
+    CHECK(args.response->SerializeToArray(msg_buf + max_length_digit, res_len));
   };
 
   GenericSendFunc(msg_len, msg_buf, serialize_func, args.rpc_id, args.conn_qp);

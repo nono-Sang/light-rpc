@@ -1,15 +1,114 @@
 #include "light_channel.h"
 #include "light_control.h"
+#include "light_log.h"
 #include "test.pb.h"
 #include "util.h"
 
-void SyncRpcCall(EchoService_Stub &stub);
-void AsyncRpcCall(EchoService_Stub &stub);
-void SyncMultiThread(EchoService_Stub &stub);
-void AsyncMultiThread(EchoService_Stub &stub);
+const int basic_test_num = 100;
+const int sleep_time_s = 10;
 
-void SyncRpcCall(EchoService_Stub &stub, int freq, int internal);
-void SyncMultiThread(EchoService_Stub &stub, int msg_size, int threads_num, int freq, int internal);
+void compare(TestRequest* req, TestResponse* res) {
+  std::unique_ptr<TestRequest> req_guard(req);
+  std::unique_ptr<TestResponse> res_guard(res);
+  CHECK(req->request() == res->response());
+}
+
+/// NOTE: sync rpc call
+void test1(EchoService_Stub &stub) {
+  for (int i = 1; i <= basic_test_num; i++) {
+    TestRequest request;
+    TestResponse response;
+    std::string req_str(i, '#');
+    request.set_request(req_str);
+    lightrpc::LightController cntl;
+    stub.Echo(&cntl, &request, &response, nullptr);
+    CHECK(request.request() == response.response());
+  }
+  std::cout << "### Test 1 pass ###" << std::endl;
+}
+
+/// NOTE: async rpc call
+void test2(EchoService_Stub &stub) {
+  for (int i = 1; i <= basic_test_num; i++) {
+    auto request = new TestRequest;
+    auto response = new TestResponse;
+    auto done = google::protobuf::NewCallback(
+      &compare, request, response);
+    std::string req_str(i, '#');
+    request->set_request(req_str);
+    lightrpc::LightController cntl;
+    stub.Echo(&cntl, request, response, done);
+  }
+  sleep(sleep_time_s);
+  std::cout << "### Test 2 pass ###" << std::endl;
+}
+
+/// NOTE: multi thread sync rpc call
+void test3(EchoService_Stub &stub) {
+  int num_thread = 3;
+  std::vector<std::thread> th_vec(num_thread);
+  for (int k = 0; k < num_thread; k++) {
+    th_vec[k] = std::thread([&stub] {
+      for (int i = 1; i <= basic_test_num; i++) {
+        TestRequest request;
+        TestResponse response;
+        std::string req_str(i, '#');
+        request.set_request(req_str);
+        lightrpc::LightController cntl;
+        stub.Echo(&cntl, &request, &response, nullptr);
+        CHECK(request.request() == response.response());
+      }
+    });
+  }
+  for (int i = 0; i < num_thread; i++) {
+    th_vec[i].join();
+  }
+  std::cout << "### Test 3 pass ###" << std::endl;
+}
+
+/// NOTE: multi thread async rpc call
+void test4(EchoService_Stub &stub) {
+  int num_thread = 3;
+  std::vector<std::thread> th_vec(num_thread);
+  for (int k = 0; k < num_thread; k++) {
+    th_vec[k] = std::thread([&stub] {
+      for (int i = 1; i <= basic_test_num; i++) {
+        auto request = new TestRequest;
+        auto response = new TestResponse;
+        auto done = google::protobuf::NewCallback(
+          &compare, request, response);
+        std::string req_str(i, '#');
+        request->set_request(req_str);
+        lightrpc::LightController cntl;
+        stub.Echo(&cntl, request, response, done);
+      }
+    });
+  }
+  for (int i = 0; i < num_thread; i++) {
+    th_vec[i].join();
+  }
+  sleep(sleep_time_s);
+  std::cout << "### Test 4 pass ###" << std::endl;
+}
+
+/// NOTE: data size from 8 bytes to 4M bytes
+void test5(EchoService_Stub &stub) {
+  int data_size = 8;
+  while (data_size <= 4 * 1024 * 1024) {
+    for (int i = 1; i <= basic_test_num; i++) {
+      TestRequest request;
+      TestResponse response;
+      std::string req_str(i, '#');
+      request.set_request(req_str);
+      lightrpc::LightController cntl;
+      stub.Echo(&cntl, &request, &response, nullptr);
+      CHECK(request.request() == response.response());
+    }
+    data_size *= 2;
+  }
+  std::cout << "### Test 5 pass ###" << std::endl;
+}
+
 
 int main(int argc, char *argv[]) {
   int num_cpus = std::thread::hardware_concurrency();
@@ -32,53 +131,10 @@ int main(int argc, char *argv[]) {
   lightrpc::LightChannel channel(server_ip, 1024, &global_res);
 
   EchoService_Stub stub(&channel);
-  SyncRpcCall(stub, atoi(argv[1]), atoi(argv[2]));
+  test1(stub);
+  test2(stub);
+  test3(stub);
+  test4(stub);
+  test5(stub);
   return 0;
-}
-
-void SyncRpcCall(EchoService_Stub &stub, int freq, int internal) {
-  // // 8 bytes -> 4M bytes
-  int init_size = 8;
-  int epoch_num = 20;
-
-  auto msglen = std::make_unique<uint32_t[]>(epoch_num);
-  auto avglat = std::make_unique<float[]>(epoch_num);
-  auto timers = std::make_unique<timespec[]>(epoch_num);
-
-  for (int i = 0; i < epoch_num; i++) {
-    msglen[i] = 0;
-    avglat[i] = 0;
-    memset(&timers[i], 0, sizeof(timespec));
-  }
-
-  timespec start, end;
-  std::cout << "req size\tmsg size" << std::endl;
-
-  for (int i = 0; i < epoch_num; i++) {
-    TestRequest request;
-    TestResponse response;
-    std::string req_str(init_size, 'A');
-    request.set_request(req_str);
-    msglen[i] = request.ByteSizeLong();
-    std::cout << req_str.size() << "\t\t" << msglen[i] << std::endl;
-    for (int j = 1; j <= freq; j++) {
-      lightrpc::LightController cntl;
-      clock_gettime(CLOCK_REALTIME, &start);
-      stub.Echo(&cntl, &request, &response, nullptr);
-      clock_gettime(CLOCK_REALTIME, &end);
-      time_add(&timers[i], time_diff(start, end));
-      if (internal) {
-        usleep(internal * 1000);
-      }
-    }
-    init_size *= 2;
-    avglat[i] = static_cast<float>(time_avg(timers[i], freq) / 1e3);  // ns -> us
-  }
-
-  FILE *fp = fopen("sync_latency.txt", "w");
-  for (int i = 0; i < epoch_num; i++) {
-    fprintf(fp, "%u %.2f", msglen[i], avglat[i]);
-    if (i != epoch_num - 1) fprintf(fp, "\n");
-  }
-  fclose(fp);
 }

@@ -48,7 +48,7 @@ void SendSmallMessage(ibv_qp *qp, uint64_t block_addr, uint32_t msg_len, uint32_
   CHECK(ibv_post_send(qp, &send_wr, &send_bad_wr) == 0);
 }
 
-void SendControlMessage(ibv_qp *qp, void *send_addr, uint32_t send_len, uint32_t imm_data) {
+void SendControlMessage(ibv_qp *qp, const char *send_addr, uint32_t send_len, uint32_t imm_data) {
   ibv_sge send_sg = {.addr = reinterpret_cast<uint64_t>(send_addr), .length = send_len};
 
   ibv_send_wr send_wr;
@@ -126,9 +126,9 @@ void GlobalResource::ObtainOneBlock(uint64_t &addr) {
   // Set non-blocking to blocking.
   if (!addr_queue_.pop(addr)) {
     LOG_INFO("# Waiting for idle blocks.");
+    while (addr_queue_.pop(addr) == false) {};
+    LOG_INFO("# Got an idle block.");
   }
-  while (addr_queue_.pop(addr) == false) {};
-  LOG_INFO("# Got an idle block.");
 }
 
 void GlobalResource::ReturnOneBlock(uint64_t addr) {
@@ -315,11 +315,8 @@ void GlobalResource::GenericSendFunc(uint32_t msg_len,
     /// NOTE: For receiving authority message.
     GetAndPostOneBlock();
     // 1. send notify message
-    NotifyMessage notify_msg;
-    notify_msg.set_rpc_id(rpc_id);
-    char notify_buf[max_uint32_field];
-    notify_msg.SerializeToArray(notify_buf, max_uint32_field);
-    SendControlMessage(conn_qp, notify_buf, max_uint32_field, msg_len);
+    auto id_str = std::to_string(rpc_id) + '\0';
+    SendControlMessage(conn_qp, id_str.c_str(), max_length_digit, msg_len);
     // 2. serialize and register memory
     serialize_func();
     ibv_mr *msg_mr = ibv_reg_mr(conn_qp->pd, msg_buf, msg_len, IBV_ACCESS_LOCAL_WRITE);
@@ -338,9 +335,7 @@ void GlobalResource::GenericSendFunc(uint32_t msg_len,
 void GlobalResource::ProcessNotifyMessage(uint32_t imm_data, uint64_t recv_addr, ibv_qp *conn_qp) {
   char *msg_addr = reinterpret_cast<char *>(recv_addr);
   auto qp_ctx = reinterpret_cast<QueuePairContext *>(conn_qp->qp_context);
-  NotifyMessage notify_msg;
-  notify_msg.ParseFromArray(msg_addr, max_uint32_field);  // no check
-  uint32_t rpc_id = notify_msg.rpc_id();
+  uint32_t rpc_id = atoll(msg_addr);
   ibv_mr *msg_mr = AllocMemoryRegion(imm_data, conn_qp->pd);
   {
     std::lock_guard<std::mutex> locker(qp_ctx->mr_mtx_);
@@ -356,15 +351,11 @@ void GlobalResource::ProcessNotifyMessage(uint32_t imm_data, uint64_t recv_addr,
   authority_msg.set_remote_addr(reinterpret_cast<uint64_t>(msg_mr->addr));
 
   uint32_t auth_len = authority_msg.ByteSizeLong();
-  AuthorityHead head;
-  head.set_authority_size(auth_len);
-  uint32_t head_len = max_uint32_field;
-
-  uint32_t total_len = head_len + auth_len;
+  uint32_t total_len = max_length_digit + auth_len;
 
   char *authority_buf = reinterpret_cast<char *>(mi_malloc(total_len));
-  head.SerializeToArray(authority_buf, head_len);
-  authority_msg.SerializeToArray(authority_buf + head_len, auth_len);
+  auto len_str = std::to_string(auth_len) + '\0';
+  authority_msg.SerializeToArray(authority_buf + max_length_digit, auth_len);
   SendControlMessage(conn_qp, authority_buf, total_len);
   mi_free(authority_buf);
 }
@@ -373,12 +364,10 @@ void GlobalResource::ProcessAuthorityMessage(uint64_t recv_addr, ibv_qp *conn_qp
   char *msg_addr = reinterpret_cast<char *>(recv_addr);
   auto qp_ctx = reinterpret_cast<QueuePairContext *>(conn_qp->qp_context);
 
-  AuthorityHead head;
-  head.ParseFromArray(msg_addr, max_uint32_field);
-  uint32_t auth_len = head.authority_size();
-
+  
+  uint32_t auth_len = atoll(msg_addr);
   AuthorityMessage authority_msg;
-  CHECK(authority_msg.ParseFromArray(msg_addr + max_uint32_field, auth_len));
+  CHECK(authority_msg.ParseFromArray(msg_addr + max_length_digit, auth_len));
 
   ReturnOneBlock(recv_addr);
   uint32_t rpc_id = authority_msg.rpc_id();

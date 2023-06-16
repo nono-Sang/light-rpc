@@ -103,28 +103,26 @@ void LightChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     cinfo_map_.insert({curr_id, info});
   }
 
-  // Message Layout: RequestHead | RequestDescrip | RequestBody
+  // Message Layout: descrip_len | RequestDescrip | RequestBody
   uint32_t req_len = request->ByteSizeLong();
   RequestDescrip descrip;
   descrip.set_rpc_id(curr_id);
   descrip.set_service_name(method->service()->name());
   descrip.set_method_name(method->name());
   uint32_t descrip_len = descrip.ByteSizeLong();
-  RequestHead head;
-  head.set_descrip_size(descrip_len);
-  uint32_t head_len = max_uint32_field;
 
   // The total length of the message to be sent.
-  uint32_t msg_len = head_len + descrip_len + req_len;
+  uint32_t msg_len = max_length_digit + descrip_len + req_len;
 
   // Define the serialization lambda function.
   char *msg_buf = nullptr;
   auto serialize_func = [&] {
     msg_buf = reinterpret_cast<char *>(mi_malloc(msg_len));
     CHECK(msg_buf != nullptr);
-    char *descrip_offset = msg_buf + head_len;
+    char *descrip_offset = msg_buf + max_length_digit;
     char *req_offset = descrip_offset + descrip_len;
-    CHECK(head.SerializeToArray(msg_buf, head_len));
+    auto len_str = std::to_string(descrip_len) + '\0';
+    memcpy(msg_buf, len_str.c_str(), max_length_digit);
     CHECK(descrip.SerializeToArray(descrip_offset, descrip_len));
     CHECK(request->SerializeToArray(req_offset, req_len));
   };
@@ -188,18 +186,15 @@ void ClientGlobalResource::ParseResponse(LightChannel *client, void *addr, uint3
     msg_addr = reinterpret_cast<char *>(mr->addr);
   }
 
-  ResponseHead head;
-  head.ParseFromArray(msg_addr, max_uint32_field);  // no check
-
-  uint32_t rpc_id = head.rpc_id();
+  uint32_t rpc_id = atoll(msg_addr);
   std::unique_lock<std::mutex> locker(client->cinfo_mtx_);
   auto it = client->cinfo_map_.find(rpc_id);
   CHECK(it != client->cinfo_map_.end());
   RpcCallInfo &callinfo = it->second;
   locker.unlock();
 
-  uint32_t res_len = msg_len - max_uint32_field;
-  CHECK(callinfo.response->ParseFromArray(msg_addr + max_uint32_field, res_len));
+  uint32_t res_len = msg_len - max_length_digit;
+  CHECK(callinfo.response->ParseFromArray(msg_addr + max_length_digit, res_len));
 
   if (msg_len <= msg_threshold) {
     ReturnOneBlock(reinterpret_cast<uint64_t>(msg_addr));

@@ -58,7 +58,7 @@ ibv_mr *AllocMemoryRegion(uint32_t msg_len, ibv_pd *pd);
 void SendSmallMessage(ibv_qp *qp, uint64_t block_addr, uint32_t msg_len, uint32_t lkey);
 // Send control messages through inline mode. For notify message, this func sets imm_data to message
 // length. For authority message, this func sets imm_data to 0.
-void SendControlMessage(ibv_qp *qp, void *send_addr, uint32_t send_len, uint32_t imm_data = 0);
+void SendControlMessage(ibv_qp *qp, const char *send_addr, uint32_t send_len, uint32_t imm_data=0);
 // Write the large message (in msg_mr) to remote. This func sets imm_data to rpc_id.
 void WriteLargeMessage(ibv_qp *qp, ibv_mr *msg_mr, uint32_t rpc_id, RemoteInfo &target);
 

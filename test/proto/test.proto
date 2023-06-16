@@ -13,3 +13,7 @@ message TestResponse {
 service EchoService {
 	rpc Echo(TestRequest) returns(TestResponse);
 }
+
+service HeteService {
+	rpc Hete(TestRequest) returns(TestResponse);
+}
