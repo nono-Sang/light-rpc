@@ -18,6 +18,19 @@ class EchoServiceImpl : public EchoService {
   }
 };
 
+class HeteServiceImpl : public HeteService {
+ public:
+  void Hete(google::protobuf::RpcController *controller,
+            const TestRequest *request,
+            TestResponse *response,
+            google::protobuf::Closure *done) override {
+    int sleep_time = request->sleep_time();
+    sleep(sleep_time);
+    response->set_response(request->request());
+    done->Run();
+  }
+};
+
 
 int main(int argc, char *argv[]) {
   int num_cpus = std::thread::hardware_concurrency();
@@ -27,14 +40,15 @@ int main(int argc, char *argv[]) {
   GetLocalIp(local_ip);
 
   int num_threads = std::min(std::max(2, num_cpus / 4), 8);
-  lightrpc::ResourceConfig config = {.local_ip = local_ip,
-                                     .local_port = 1024,
-                                     .block_pool_size = 100 * 1024 * 1024,
-                                     .num_threads = num_threads};
+  std::cout << "There are " << num_threads << " threads in thread pool." << std::endl;
+  lightrpc::ResourceConfig config = {
+    .local_ip = local_ip, .local_port = 1024, .num_threads = num_threads};
 
   lightrpc::LightServer server(config);
   EchoServiceImpl echo_service;
+  HeteServiceImpl hete_service;
   server.AddService(lightrpc::SERVER_DOESNT_OWN_SERVICE, &echo_service);
+  server.AddService(lightrpc::SERVER_DOESNT_OWN_SERVICE, &hete_service);
   server.BuildAndStart();
   return 0;
 }

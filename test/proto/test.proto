@@ -4,6 +4,7 @@ option cc_generic_services = true;
 
 message TestRequest {
 	bytes request = 1;
+	int32 sleep_time = 2;
 }
 
 message TestResponse {

@@ -84,9 +84,10 @@ void WriteLargeMessage(ibv_qp *qp, ibv_mr *msg_mr, uint32_t rpc_id, RemoteInfo &
 
 GlobalResource::GlobalResource(const ResourceConfig &config)
     : config_(config),
-      num_blocks_(config_.block_pool_size / msg_threshold),
+      num_blocks_(block_pool_size / msg_threshold),
       addr_queue_(num_blocks_),
-      handler_work_(handler_service_) {
+      wc_work_(wc_ctx_),
+      ctlmsg_work_(ctlmsg_ctx_) {
   CreateControlID();
   BindLocalDevice();
   CreateBlockPool();
@@ -98,17 +99,19 @@ GlobalResource::GlobalResource(const ResourceConfig &config)
 GlobalResource::~GlobalResource() {
   for (int i = 0; i < config_.num_threads; i++) {
     auto thread_id = thread_pool_[i].get_id();
-    service_pool_[i]->stop();
+    pool_ctx_[i]->stop();
     thread_pool_[i].join();
     delete thread_info_map_[thread_id];
-    delete work_pool_[i];
-    delete service_pool_[i];
+    delete pool_work_[i];
+    delete pool_ctx_[i];
   }
 
   poller_stop_ = true;
   wc_poller_.join();
-  handler_service_.stop();
+  wc_ctx_.stop();
   wc_handler_.join();
+  ctlmsg_ctx_.stop();
+  ctlmsg_handler_.join();
 
   auto addr_ptr = shared_mr_->addr;
   CHECK(ibv_dereg_mr(shared_mr_) == 0);
@@ -132,7 +135,6 @@ void GlobalResource::ObtainOneBlock(uint64_t &addr) {
 }
 
 void GlobalResource::ReturnOneBlock(uint64_t addr) {
-  memset(reinterpret_cast<void *>(addr), 0, msg_threshold);
   addr_queue_.push(addr);
 }
 
@@ -158,9 +160,8 @@ void GlobalResource::BindLocalDevice() {
 }
 
 void GlobalResource::CreateBlockPool() {
-  shared_mr_ = AllocMemoryRegion(config_.block_pool_size, cm_id_->pd);
+  shared_mr_ = AllocMemoryRegion(block_pool_size, cm_id_->pd);
   auto addr_ptr = shared_mr_->addr;
-  memset(addr_ptr, 0, config_.block_pool_size);
 
   uint64_t mr_addr = reinterpret_cast<uint64_t>(addr_ptr);
   for (int i = 0; i < num_blocks_; i++) {
@@ -185,13 +186,13 @@ void GlobalResource::CreateSharedQueue() {
 
 void GlobalResource::StartWorkerThread() {
   thread_pool_.resize(config_.num_threads);
-  service_pool_.resize(config_.num_threads);
-  work_pool_.resize(config_.num_threads);
+  pool_ctx_.resize(config_.num_threads);
+  pool_work_.resize(config_.num_threads);
 
   for (int i = 0; i < config_.num_threads; i++) {
-    service_pool_[i] = new boost::asio::io_context;
-    work_pool_[i] = new boost::asio::io_context::work(*service_pool_[i]);
-    thread_pool_[i] = std::thread([this, i] { this->service_pool_[i]->run(); });
+    pool_ctx_[i] = new boost::asio::io_context;
+    pool_work_[i] = new boost::asio::io_context::work(*pool_ctx_[i]);
+    thread_pool_[i] = std::thread([this, i] { this->pool_ctx_[i]->run(); });
 
     auto thread_id = thread_pool_[i].get_id();
     auto thread_info = new ThreadInfo(i);
@@ -199,7 +200,9 @@ void GlobalResource::StartWorkerThread() {
   }
 
   // Start the send wc handler thread.
-  wc_handler_ = std::thread([this] { this->handler_service_.run(); });
+  wc_handler_ = std::thread([this] { this->wc_ctx_.run(); });
+  // Start the control message handler thread.
+  ctlmsg_handler_ = std::thread([this] { this->ctlmsg_ctx_.run(); });
 }
 
 void GlobalResource::StartPollerThread() {
@@ -262,15 +265,16 @@ void GlobalResource::PollWorkCompletion() {
 void GlobalResource::ProcessSendWorkCompletion(ibv_wc &wc) {
   uint64_t addr = wc.wr_id;
   if (wc.opcode == IBV_WC_RDMA_WRITE) {
-    handler_service_.post([this, addr] {
+    wc_ctx_.post([this, addr] {
       ibv_mr *mr_ptr = reinterpret_cast<ibv_mr *>(addr);
       void *mr_addr_ptr = mr_ptr->addr;
       CHECK(ibv_dereg_mr(mr_ptr) == 0);
       mi_free(mr_addr_ptr);
     });
   } else {
-    ReturnOneBlock(addr);  // wc.opcode is IBV_WC_SEND
+    if (addr) ReturnOneBlock(addr);  // wc.opcode is IBV_WC_SEND
   }
+
 }
 
 int GlobalResource::SelectTargetThread() {
@@ -343,7 +347,6 @@ void GlobalResource::ProcessNotifyMessage(uint32_t imm_data, uint64_t recv_addr,
   }
 
   /// NOTE: For receiving write-with-imm data (reuse block).
-  memset(reinterpret_cast<void *>(recv_addr), 0, msg_threshold);
   PostOneRecvRequest(recv_addr);
   AuthorityMessage authority_msg;
   authority_msg.set_rpc_id(rpc_id);
@@ -355,6 +358,7 @@ void GlobalResource::ProcessNotifyMessage(uint32_t imm_data, uint64_t recv_addr,
 
   char *authority_buf = reinterpret_cast<char *>(mi_malloc(total_len));
   auto len_str = std::to_string(auth_len) + '\0';
+  memcpy(authority_buf, len_str.c_str(), max_length_digit);
   authority_msg.SerializeToArray(authority_buf + max_length_digit, auth_len);
   SendControlMessage(conn_qp, authority_buf, total_len);
   mi_free(authority_buf);

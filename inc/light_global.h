@@ -19,7 +19,6 @@ struct RemoteInfo {
 struct ResourceConfig {
   std::string local_ip;
   int local_port;
-  int block_pool_size;
   int num_threads;
   ResourceConfig(const ResourceConfig &) = default;
 };
@@ -61,6 +60,7 @@ void SendSmallMessage(ibv_qp *qp, uint64_t block_addr, uint32_t msg_len, uint32_
 void SendControlMessage(ibv_qp *qp, const char *send_addr, uint32_t send_len, uint32_t imm_data=0);
 // Write the large message (in msg_mr) to remote. This func sets imm_data to rpc_id.
 void WriteLargeMessage(ibv_qp *qp, ibv_mr *msg_mr, uint32_t rpc_id, RemoteInfo &target);
+
 
 class GlobalResource {
  public:
@@ -114,17 +114,22 @@ class GlobalResource {
   boost::lockfree::queue<uint64_t> addr_queue_;
 
   // Thread pool.
-  std::vector<std::thread> thread_pool_;
   std::unordered_map<std::thread::id, ThreadInfo *> thread_info_map_;
-  std::vector<boost::asio::io_context *> service_pool_;
-  std::vector<boost::asio::io_context::work *> work_pool_;
+  std::vector<std::thread> thread_pool_;
+  std::vector<boost::asio::io_context *> pool_ctx_;;
+  std::vector<boost::asio::io_context::work *> pool_work_;
 
   // Poller (recv/send wc) and send wc handler.
   std::thread wc_poller_;
   std::atomic<bool> poller_stop_;
   std::thread wc_handler_;
-  boost::asio::io_context handler_service_;
-  boost::asio::io_context::work handler_work_;
+  boost::asio::io_context wc_ctx_;
+  boost::asio::io_context::work wc_work_;
+
+  // Process notify message or authority message.
+  std::thread ctlmsg_handler_;
+  boost::asio::io_context ctlmsg_ctx_;
+  boost::asio::io_context::work ctlmsg_work_;
 };
 
 }  // namespace lightrpc

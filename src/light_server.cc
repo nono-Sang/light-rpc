@@ -11,7 +11,7 @@ namespace lightrpc {
 LightServer::LightServer(ResourceConfig config) : GlobalResource(config) {
   /// NOTE: Post some recv requests in advance.
   int post_num = srq_max_wr;
-  CHECK(post_num < num_blocks_ / 2);
+  CHECK(post_num <= num_blocks_ / 2);
   for (int i = 0; i < post_num; i++) {
     uint64_t recv_addr = 0;
     ObtainOneBlock(recv_addr);
@@ -109,37 +109,40 @@ void LightServer::ProcessRecvWorkCompletion(ibv_wc &wc) {
     conn_qp = it->second;
   }
 
-  int goal_thread_id = SelectTargetThread();
-  auto thread_id = thread_pool_[goal_thread_id].get_id();
-  thread_info_map_[thread_id]->IncTotalCount();
-  // std::cout << goal_thread_id << std::endl;
-
   uint32_t imm_data = ntohl(wc.imm_data);
   uint64_t recv_addr = wc.wr_id;
   ibv_wc_opcode opcode = wc.opcode;
 
-  service_pool_[goal_thread_id]->post([this, conn_qp, imm_data, recv_addr, opcode] {
+  if (opcode == IBV_WC_RECV && (imm_data == 0 || imm_data > msg_threshold)) {
+    ctlmsg_ctx_.post([this, conn_qp, imm_data, recv_addr] {
+      /// Received authority message (imm_data is 0).
+      if (imm_data == 0) ProcessAuthorityMessage(recv_addr, conn_qp);
+      /// Received notify message (imm_data is msg_len).
+      else ProcessNotifyMessage(imm_data, recv_addr, conn_qp);
+    });
+    return;
+  }
+
+  int goal_thread_id = SelectTargetThread();
+  auto thread_id = thread_pool_[goal_thread_id].get_id();
+  thread_info_map_[thread_id]->IncTotalCount();
+
+  pool_ctx_[goal_thread_id]->post([this, conn_qp, imm_data, recv_addr, opcode] {
     auto thread_id = std::this_thread::get_id();
     if (opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
       /// Received large message (imm_data is rpc_id).
       /// NOTE: For next rpc request (reuse block).
-      memset(reinterpret_cast<void *>(recv_addr), 0, msg_threshold);
       PostOneRecvRequest(recv_addr);
       ibv_mr *msg_mr = GetAndEraseMemoryRegion(imm_data, conn_qp);
       uint32_t msg_len = static_cast<uint32_t>(msg_mr->length);
       ParseRequest(conn_qp, msg_mr, msg_len);
-    } else if (imm_data == 0) {
-      /// Received authority message (imm_data is 0).
-      ProcessAuthorityMessage(recv_addr, conn_qp);
-    } else if (imm_data <= msg_threshold) {
+    } else {
       /// Received small message (imm_data is msg_len).
       /// NOTE: For next rpc request.
+      CHECK(imm_data <= msg_threshold);
       GetAndPostOneBlock();
       char *msg_addr = reinterpret_cast<char *>(recv_addr);
       ParseRequest(conn_qp, msg_addr, imm_data);
-    } else {
-      /// Received notify message (imm_data is msg_len).
-      ProcessNotifyMessage(imm_data, recv_addr, conn_qp);
     }
     thread_info_map_[thread_id]->IncCompleteCount();
   });

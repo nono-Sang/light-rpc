@@ -144,15 +144,26 @@ void ClientGlobalResource::ProcessRecvWorkCompletion(ibv_wc &wc) {
     client = it->second;
   }
 
-  int goal_thread_id = SelectTargetThread();
-  auto thread_id = thread_pool_[goal_thread_id].get_id();
-  thread_info_map_[thread_id]->IncTotalCount();
-
   uint32_t imm_data = ntohl(wc.imm_data);
   uint64_t recv_addr = wc.wr_id;
   ibv_wc_opcode opcode = wc.opcode;
 
-  service_pool_[goal_thread_id]->post([this, client, imm_data, recv_addr, opcode] {
+  if (wc.opcode == IBV_WC_RECV && (imm_data == 0 || imm_data > msg_threshold)) {
+    ctlmsg_ctx_.post([this, client, imm_data, recv_addr] {
+      auto conn_qp = client->conn_id_->qp;
+      /// Received authority message (imm_data is 0).
+      if (imm_data == 0) ProcessAuthorityMessage(recv_addr, conn_qp);
+      /// Received notify message (imm_data is msg_len).
+      else ProcessNotifyMessage(imm_data, recv_addr, conn_qp);
+    });
+    return;
+  }
+
+  int goal_thread_id = SelectTargetThread();
+  auto thread_id = thread_pool_[goal_thread_id].get_id();
+  thread_info_map_[thread_id]->IncTotalCount();
+
+  pool_ctx_[goal_thread_id]->post([this, client, imm_data, recv_addr, opcode] {
     auto thread_id = std::this_thread::get_id();
     auto conn_qp = client->conn_id_->qp;
     if (opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
@@ -162,16 +173,11 @@ void ClientGlobalResource::ProcessRecvWorkCompletion(ibv_wc &wc) {
       ibv_mr *msg_mr = GetAndEraseMemoryRegion(imm_data, conn_qp);
       uint32_t msg_len = static_cast<uint32_t>(msg_mr->length);
       ParseResponse(client, msg_mr, msg_len);
-    } else if (imm_data == 0) {
-      /// Received authority message (imm_data is 0).
-      ProcessAuthorityMessage(recv_addr, conn_qp);
-    } else if (imm_data <= msg_threshold) {
+    } else {
       /// Received small message (imm_data is msg_len).
+      CHECK(imm_data <= msg_threshold);
       char *msg_addr = reinterpret_cast<char *>(recv_addr);
       ParseResponse(client, msg_addr, imm_data);
-    } else {
-      /// Received notify message (imm_data is msg_len).
-      ProcessNotifyMessage(imm_data, recv_addr, conn_qp);
     }
     thread_info_map_[thread_id]->IncCompleteCount();
   });
