@@ -18,3 +18,7 @@ service EchoService {
 service HeteService {
 	rpc Hete(TestRequest) returns(TestResponse);
 }
+
+service FixRepService {
+	rpc FixRep(TestRequest) returns(TestResponse);
+};
