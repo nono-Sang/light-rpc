@@ -23,7 +23,7 @@ message(STATUS "Boost ${Boost_VERSION}, Mimalloc ${Mimalloc_VERSION}, Protobuf $
 include_directories(${Boost_INCLUDE_DIRS})
 include_directories(${MIMALLOC_INCLUDE_DIR})
 include_directories(${Protobuf_INCLUDE_DIRS})
-include_directories(${MPI_INCLUDE_PATH})
+# include_directories(${MPI_INCLUDE_PATH})
 include_directories(${PROJECT_SOURCE_DIR}/inc)
 
 # message(STATUS ${Boost_INCLUDE_DIRS})
@@ -49,5 +49,5 @@ add_executable(server test/server.cc ${TEST_PROTO_SRCS})
 target_link_libraries(client lightrpc)
 target_link_libraries(server lightrpc)
 
-add_executable(mpi_test test/mpi_test.cc ${TEST_PROTO_SRCS})
-target_link_libraries(mpi_test lightrpc ${MPI_LIBRARIES})
+# add_executable(mpi_test test/mpi_test.cc ${TEST_PROTO_SRCS})
+# target_link_libraries(mpi_test lightrpc ${MPI_LIBRARIES})

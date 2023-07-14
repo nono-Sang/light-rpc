@@ -1,5 +1,6 @@
 #pragma once
 
+#include "light_def.h"
 #include <rdma/rdma_cma.h>
 
 #include <boost/asio.hpp>
@@ -14,13 +15,28 @@ struct RemoteInfo {
   RemoteInfo(const RemoteInfo &) = default;
 };
 
+enum PollingMode { EVENT_NOTIFY, BUSY_POLLING };
+
 // If the local_port is set to a negative number, the system will automatically
 // allocate a port.
 struct ResourceConfig {
   std::string local_ip;
   int local_port;
   int num_threads;
+  PollingMode poll_mode;
+  uint32_t block_pool_size;
   ResourceConfig(const ResourceConfig &) = default;
+  ResourceConfig(std::string ip, 
+                 int port,  
+                 int num = 1, 
+                 PollingMode mode = BUSY_POLLING, 
+                 uint32_t size = 1024 * 1024 * 1024) {
+    local_ip = ip;
+    local_port = port;
+    num_threads = num;
+    poll_mode = mode;
+    block_pool_size = size;
+  }
 };
 
 struct QueuePairContext {
@@ -83,6 +99,7 @@ class GlobalResource {
   void PostOneRecvRequest(uint64_t recv_addr);
   // Use a single thread to poll wc from the recv cq.
   void PollWorkCompletion();
+  void BlockPollWorkCompletion();
 
   void ProcessSendWorkCompletion(ibv_wc &wc);
   virtual void ProcessRecvWorkCompletion(ibv_wc &wc) = 0;
@@ -107,6 +124,8 @@ class GlobalResource {
   ibv_srq *shared_rq_;
   ibv_cq *shared_send_cq_;
   ibv_cq *shared_recv_cq_;
+  ibv_comp_channel* send_chan_;
+  ibv_comp_channel* recv_chan_;
 
   // Block pool.
   ibv_mr *shared_mr_;
@@ -119,12 +138,9 @@ class GlobalResource {
   std::vector<boost::asio::io_context *> pool_ctx_;;
   std::vector<boost::asio::io_context::work *> pool_work_;
 
-  // Poller (recv/send wc) and send wc handler.
+  int ent_fd_;  // notify thread to return
   std::thread wc_poller_;
   std::atomic<bool> poller_stop_;
-  std::thread wc_handler_;
-  boost::asio::io_context wc_ctx_;
-  boost::asio::io_context::work wc_work_;
 
   // Process notify message or authority message.
   std::thread ctlmsg_handler_;

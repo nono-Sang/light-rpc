@@ -19,6 +19,5 @@ const uint32_t max_send_wr = 1024;
 
 const uint32_t max_inline_data = 256;
 const uint32_t msg_threshold = 6 * 1024;
-const uint32_t block_pool_size = msg_threshold * 1024 * 2;
 
 }  // namespace lightrpc

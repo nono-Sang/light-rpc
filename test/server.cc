@@ -41,8 +41,7 @@ int main(int argc, char *argv[]) {
 
   int num_threads = std::min(std::max(2, num_cpus / 4), 8);
   std::cout << "There are " << num_threads << " threads in thread pool." << std::endl;
-  lightrpc::ResourceConfig config = {
-    .local_ip = local_ip, .local_port = 1024, .num_threads = num_threads};
+  lightrpc::ResourceConfig config(local_ip, 1024, num_threads, lightrpc::BUSY_POLLING);
 
   lightrpc::LightServer server(config);
   EchoServiceImpl echo_service;

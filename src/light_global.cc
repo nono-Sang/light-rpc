@@ -84,9 +84,8 @@ void WriteLargeMessage(ibv_qp *qp, ibv_mr *msg_mr, uint32_t rpc_id, RemoteInfo &
 
 GlobalResource::GlobalResource(const ResourceConfig &config)
     : config_(config),
-      num_blocks_(block_pool_size / msg_threshold),
+      num_blocks_(config_.block_pool_size / msg_threshold),
       addr_queue_(num_blocks_),
-      wc_work_(wc_ctx_),
       ctlmsg_work_(ctlmsg_ctx_) {
   CreateControlID();
   BindLocalDevice();
@@ -106,10 +105,13 @@ GlobalResource::~GlobalResource() {
     delete pool_ctx_[i];
   }
 
-  poller_stop_ = true;
+  if (config_.poll_mode == BUSY_POLLING) {
+    poller_stop_ = true;
+  } else {
+    uint64_t val = 1;
+    CHECK(write(ent_fd_, &val, sizeof(uint64_t)) != -1);
+  }
   wc_poller_.join();
-  wc_ctx_.stop();
-  wc_handler_.join();
   ctlmsg_ctx_.stop();
   ctlmsg_handler_.join();
 
@@ -120,6 +122,8 @@ GlobalResource::~GlobalResource() {
   CHECK(ibv_destroy_srq(shared_rq_) == 0);
   CHECK(ibv_destroy_cq(shared_send_cq_) == 0);
   CHECK(ibv_destroy_cq(shared_recv_cq_) == 0);
+  CHECK(ibv_destroy_comp_channel(send_chan_) == 0);
+  CHECK(ibv_destroy_comp_channel(recv_chan_) == 0);
   auto temp_chan = cm_id_->channel;
   CHECK(rdma_destroy_id(cm_id_) == 0);
   rdma_destroy_event_channel(temp_chan);
@@ -160,7 +164,7 @@ void GlobalResource::BindLocalDevice() {
 }
 
 void GlobalResource::CreateBlockPool() {
-  shared_mr_ = AllocMemoryRegion(block_pool_size, cm_id_->pd);
+  shared_mr_ = AllocMemoryRegion(config_.block_pool_size, cm_id_->pd);
   auto addr_ptr = shared_mr_->addr;
 
   uint64_t mr_addr = reinterpret_cast<uint64_t>(addr_ptr);
@@ -178,9 +182,13 @@ void GlobalResource::CreateSharedQueue() {
   shared_rq_ = ibv_create_srq(cm_id_->pd, &srq_init_attr);
   CHECK(shared_rq_ != nullptr);
 
-  shared_send_cq_ = ibv_create_cq(cm_id_->verbs, min_cqe_num, nullptr, nullptr, 0);
+  send_chan_ = ibv_create_comp_channel(cm_id_->verbs);
+  recv_chan_ = ibv_create_comp_channel(cm_id_->verbs);
+  CHECK(send_chan_ != nullptr && recv_chan_ != nullptr);
+
+  shared_send_cq_ = ibv_create_cq(cm_id_->verbs, min_cqe_num, nullptr, send_chan_, 0);
   CHECK(shared_send_cq_ != nullptr);
-  shared_recv_cq_ = ibv_create_cq(cm_id_->verbs, min_cqe_num, nullptr, nullptr, 0);
+  shared_recv_cq_ = ibv_create_cq(cm_id_->verbs, min_cqe_num, nullptr, recv_chan_, 0);
   CHECK(shared_recv_cq_ != nullptr);
 }
 
@@ -199,15 +207,16 @@ void GlobalResource::StartWorkerThread() {
     thread_info_map_.insert({thread_id, thread_info});
   }
 
-  // Start the send wc handler thread.
-  wc_handler_ = std::thread([this] { this->wc_ctx_.run(); });
   // Start the control message handler thread.
   ctlmsg_handler_ = std::thread([this] { this->ctlmsg_ctx_.run(); });
 }
 
 void GlobalResource::StartPollerThread() {
   poller_stop_ = false;
-  wc_poller_ = std::thread([this] { this->PollWorkCompletion(); });
+  wc_poller_ = std::thread([this] { 
+    if (config_.poll_mode == BUSY_POLLING) this->PollWorkCompletion();
+    else this->BlockPollWorkCompletion();
+  });
 }
 
 void GlobalResource::CreateQueuePair(rdma_cm_id *conn_id) {
@@ -262,19 +271,62 @@ void GlobalResource::PollWorkCompletion() {
   }
 }
 
+void GlobalResource::BlockPollWorkCompletion() {
+  // Next completion whether it is solicited or not.
+  CHECK(ibv_req_notify_cq(shared_send_cq_, 0) == 0);
+  CHECK(ibv_req_notify_cq(shared_recv_cq_, 0) == 0);
+
+  ent_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  int send_fd = send_chan_->fd;
+  int send_flags = fcntl(send_fd, F_GETFL);
+  CHECK(fcntl(send_fd, F_SETFL, send_flags | O_NONBLOCK) >= 0);
+  int recv_fd = recv_chan_->fd;
+  int recv_flags = fcntl(recv_fd, F_GETFL);
+  CHECK(fcntl(recv_fd, F_SETFL, recv_flags | O_NONBLOCK) >= 0);
+
+  pollfd arr[3];
+  arr[0] = { .fd = ent_fd_, .events = POLLIN };
+  arr[1] = { .fd = send_fd, .events = POLLIN };
+  arr[2] = { .fd = recv_fd, .events = POLLIN };
+
+  auto ProcessEventFunc = [this](ibv_comp_channel* comp_chan, ibv_cq* shared_cq) {
+    ibv_cq* ev_cq = nullptr; 
+    void* ev_ctx = nullptr;
+    CHECK(ibv_get_cq_event(comp_chan, &ev_cq, &ev_ctx) == 0);
+    CHECK(ev_cq == shared_cq);
+    ibv_ack_cq_events(ev_cq, 1);
+    CHECK(ibv_req_notify_cq(shared_cq, 0) == 0);
+
+    int res = 0; ibv_wc wc;
+    while (true) {
+      res = ibv_poll_cq(shared_cq, 1, &wc);
+      if (res == 0) break;
+      CHECK(res == 1 && wc.status == IBV_WC_SUCCESS);
+      if (shared_cq == shared_send_cq_) ProcessSendWorkCompletion(wc);
+      else ProcessRecvWorkCompletion(wc);
+      memset(&wc, 0, sizeof(wc));
+    }
+  };
+
+  while (true) {
+    int num = poll(arr, 3, -1);
+    CHECK(num > 0);
+    if (arr[0].revents & POLLIN) return;
+    if (arr[1].revents & POLLIN) ProcessEventFunc(send_chan_, shared_send_cq_);
+    if (arr[2].revents & POLLIN) ProcessEventFunc(recv_chan_, shared_recv_cq_);
+  }
+}
+
 void GlobalResource::ProcessSendWorkCompletion(ibv_wc &wc) {
   uint64_t addr = wc.wr_id;
   if (wc.opcode == IBV_WC_RDMA_WRITE) {
-    wc_ctx_.post([this, addr] {
-      ibv_mr *mr_ptr = reinterpret_cast<ibv_mr *>(addr);
-      void *mr_addr_ptr = mr_ptr->addr;
-      CHECK(ibv_dereg_mr(mr_ptr) == 0);
-      mi_free(mr_addr_ptr);
-    });
+    ibv_mr *mr_ptr = reinterpret_cast<ibv_mr *>(addr);
+    void *mr_addr_ptr = mr_ptr->addr;
+    CHECK(ibv_dereg_mr(mr_ptr) == 0);
+    mi_free(mr_addr_ptr);
   } else {
     if (addr) ReturnOneBlock(addr);  // wc.opcode is IBV_WC_SEND
   }
-
 }
 
 int GlobalResource::SelectTargetThread() {

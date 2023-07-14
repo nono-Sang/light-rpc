@@ -141,12 +141,12 @@ void test6(HeteService_Stub &stub) {
 
 void SyncLatencyTest(EchoService_Stub& stub, int freq = 10000) {
   int data_size = 8;
-  int end_size = 4 * 1024 * 1024;
+  int end_size = 16 * 1024 * 1024;
 
   std::vector<uint32_t> msglen_vec;
   std::vector<float> avglat_vec;
   timespec start, end;
-  std::cout << "req size" << "\t" << "msg size" << std::endl;
+  std::cout << "req size" << "  " << "msg size" << std::endl;
 
   while (data_size <= end_size) {
     TestRequest request;
@@ -155,8 +155,9 @@ void SyncLatencyTest(EchoService_Stub& stub, int freq = 10000) {
     request.set_request(req_str);
     uint32_t msglen = request.ByteSizeLong();
     msglen_vec.emplace_back(msglen); 
-    std::cout << req_str.size() << "\t\t" << msglen << std::endl;
+    std::cout << req_str.size() << "  " << msglen << std::endl;
     
+    if (data_size >= 1024 * 1024) freq = 5000;
     clock_gettime(CLOCK_REALTIME, &start);
     for (int i = 1; i <= freq; i++) {
       lightrpc::LightController cntl;
@@ -175,12 +176,11 @@ void SyncLatencyTest(EchoService_Stub& stub, int freq = 10000) {
   }
   fclose(fp);
 }
- 
-void MultiThreadTest(EchoService_Stub& stub, int freq, int data_size) {
-  timespec max_time;
-  clock_gettime(CLOCK_REALTIME, &max_time);
+
+void MultiThreadTest(EchoService_Stub& stub, int freq, int data_size, int internal) {
   int num_thread_vec[7] = {1, 2, 4, 8, 16, 32, 48};
   std::vector<float> total_time_vec(7);  // us
+  std::vector<float> lty_99_vec(7), lty_mean_vec(7);  // us
   std::vector<uint32_t> total_call_vec(7);
   std::vector<float> throughput_vec(7);  // k/s
 
@@ -188,56 +188,69 @@ void MultiThreadTest(EchoService_Stub& stub, int freq, int data_size) {
     int num_threads = num_thread_vec[i];
     std::cout << "the number of threads is: " << num_threads << std::endl;
     std::vector<std::thread> thread_vec(num_threads);
-    std::unordered_map<std::thread::id, timespec> startTime_map_, endTime_map_;
-    std::mutex map_mtx_;
+    std::vector<timespec> time_vec(num_threads); 
+    std::vector<std::vector<uint64_t>> lty_vec(num_threads, std::vector<uint64_t>(freq)); 
+    for (int i = 0; i < num_threads; i++) memset(&time_vec[i], 0, sizeof(timespec));
     for (int k = 0; k < num_threads; k++) {
       thread_vec[k] = std::thread(
-        [&stub, &startTime_map_, &endTime_map_, &map_mtx_, freq, data_size] {
+        [k, &time_vec, &lty_vec, &stub, freq, data_size, internal] {
         TestRequest request;
         TestResponse response;
         std::string req_str(data_size, '#');
         request.set_request(req_str);
 
         timespec start, end;
-        clock_gettime(CLOCK_REALTIME, &start);
-        for (int t = 1; t <= freq; t++) {
+        for (int t = 0; t < freq; t++) {
+          clock_gettime(CLOCK_REALTIME, &start);
           lightrpc::LightController cntl;
           stub.Echo(&cntl, &request, &response, nullptr);
+          clock_gettime(CLOCK_REALTIME, &end);
+          time_add(&time_vec[k], time_diff(start, end));
+          lty_vec[k][t] = time_avg(time_diff(start, end), 1);
+          if(internal) usleep(internal);  // us
         }
-        clock_gettime(CLOCK_REALTIME, &end);
-
-        std::lock_guard<std::mutex> locker(map_mtx_);
-        startTime_map_.insert({std::this_thread::get_id(), start});
-        endTime_map_.insert({std::this_thread::get_id(), end});
       });
     }
 
     for (int k = 0; k < num_threads; k++) {
       thread_vec[k].join();
     }
-    timespec min_time;
-    clock_gettime(CLOCK_REALTIME, &min_time);
-    for (auto& kv : startTime_map_) {
-      if (time_compare(min_time, kv.second)) min_time = kv.second;
+
+    std::vector<uint64_t> all_lty_vec(num_threads * freq);
+    for (int k = 0; k < num_threads; k++) {
+      for (int t = 0; t < freq; t++) {
+        all_lty_vec[k * freq + t] = lty_vec[k][t];
+      }
     }
-    for (auto& kv : endTime_map_) {
-      if (time_compare(kv.second, max_time)) max_time = kv.second;
+    std::sort(all_lty_vec.begin(), all_lty_vec.end());
+    int idx_99 = (num_threads * freq - 1) * 0.99;
+    lty_99_vec[i] = all_lty_vec[idx_99] / 1000.0;
+    uint64_t all_lty_sum = 0;
+
+    timespec max_time;
+    memset(&max_time, 0, sizeof(timespec));
+    for (auto& val : time_vec) {
+      if (time_compare(val, max_time)) max_time = val;
+      all_lty_sum += time_avg(val, 1);
     }
 
-    float total_time = time_avg(time_diff(min_time, max_time), 1) / 1e3;
+    float total_time = time_avg(max_time, 1) / 1e3;
     uint64_t total_call = num_threads * freq;
     float throughput = total_call * 1e3 / total_time;
+
     total_time_vec[i] = total_time;
     total_call_vec[i] = total_call;
     throughput_vec[i] = throughput;
+    lty_mean_vec[i] = all_lty_sum / 1000.0 / total_call;
   }
 
   std::string file_name = std::to_string(data_size) + "_throughput.txt";
   FILE *fp = fopen(file_name.c_str(), "w");
   for (int i = 0; i < 7; i++) {
-    fprintf(fp, "%.3f\n", total_time_vec[i]);
-    fprintf(fp, "%u\n", total_call_vec[i]);
-    fprintf(fp, "%.3f\n", throughput_vec[i]);
+    // fprintf(fp, "%.3f\n", total_time_vec[i]);
+    // fprintf(fp, "%u\n", total_call_vec[i]);
+    fprintf(fp, "%.3f %.3f %.3f", throughput_vec[i], lty_mean_vec[i], lty_99_vec[i]);
+    if (i != 6) fprintf(fp, "\n");
   }
   fclose(fp);
 }
@@ -252,8 +265,7 @@ int main(int argc, char *argv[]) {
 
   int num_threads = std::min(std::max(2, num_cpus / 4), 8);
   std::cout << "There are " << num_threads << " threads in thread pool." << std::endl;
-  lightrpc::ResourceConfig config = {
-    .local_ip = local_ip, .local_port = -1, .num_threads = num_threads};
+  lightrpc::ResourceConfig config(local_ip, -1, num_threads, lightrpc::BUSY_POLLING);
 
   std::string server_ip;
   std::cout << "Input the server IP address: ";
@@ -265,13 +277,19 @@ int main(int argc, char *argv[]) {
   EchoService_Stub echo_stub(&channel);
   HeteService_Stub hete_stub(&channel);
   preheat(echo_stub);
-  test1(echo_stub);
-  test2(echo_stub);
-  test3(echo_stub);
-  test4(echo_stub);
-  test5(echo_stub);
-  test6(hete_stub);
+  // test1(echo_stub);
+  // test2(echo_stub);
+  // test3(echo_stub);
+  // test4(echo_stub);
+  // test5(echo_stub);
+  // test6(hete_stub);
+
   SyncLatencyTest(echo_stub);
-  MultiThreadTest(echo_stub, 5000, 512 * 1024);
+
+  // int internal = 0;  // us
+  // MultiThreadTest(echo_stub, 10000, 512, internal);
+  // MultiThreadTest(echo_stub, 5000, 4 * 1024, internal);
+  // MultiThreadTest(echo_stub, 5000, 512 * 1024, internal);
+  // MultiThreadTest(echo_stub, 500, 4 * 1024 * 1024, internal);
   return 0;
 }
