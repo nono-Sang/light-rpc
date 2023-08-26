@@ -15,6 +15,10 @@ struct RemoteInfo {
   RemoteInfo(const RemoteInfo &) = default;
 };
 
+static int default_num_cpus = std::thread::hardware_concurrency();
+static int default_num_work_th = std::min(std::max(2, default_num_cpus / 4), 8);
+static int default_num_io_th = default_num_work_th / 2;
+
 enum PollingMode { EVENT_NOTIFY, BUSY_POLLING };
 
 // If the local_port is set to a negative number, the system will automatically
@@ -22,18 +26,21 @@ enum PollingMode { EVENT_NOTIFY, BUSY_POLLING };
 struct ResourceConfig {
   std::string local_ip;
   int local_port;
-  int num_threads;
+  int num_work_threads;
+  int num_io_threads;
   PollingMode poll_mode;
   uint32_t block_pool_size;
   ResourceConfig(const ResourceConfig &) = default;
   ResourceConfig(std::string ip, 
-                 int port,  
-                 int num = 1, 
+                 int port = -1, 
+                 int num_work_th = default_num_work_th, 
+                 int num_io_th = default_num_io_th, 
                  PollingMode mode = BUSY_POLLING, 
                  uint32_t size = 1024 * 1024 * 1024) {
     local_ip = ip;
     local_port = port;
-    num_threads = num;
+    num_work_threads = num_work_th;
+    num_io_threads = num_io_th;
     poll_mode = mode;
     block_pool_size = size;
   }
@@ -135,7 +142,7 @@ class GlobalResource {
   // Thread pool.
   std::unordered_map<std::thread::id, ThreadInfo *> thread_info_map_;
   std::vector<std::thread> thread_pool_;
-  std::vector<boost::asio::io_context *> pool_ctx_;;
+  std::vector<boost::asio::io_context *> pool_ctx_;
   std::vector<boost::asio::io_context::work *> pool_work_;
 
   int ent_fd_;  // notify thread to return
@@ -143,7 +150,7 @@ class GlobalResource {
   std::atomic<bool> poller_stop_;
 
   // Process notify message or authority message.
-  std::thread ctlmsg_handler_;
+  std::vector<std::thread> ctlmsg_handler_;
   boost::asio::io_context ctlmsg_ctx_;
   boost::asio::io_context::work ctlmsg_work_;
 };

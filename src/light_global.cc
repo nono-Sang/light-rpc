@@ -85,7 +85,7 @@ void WriteLargeMessage(ibv_qp *qp, ibv_mr *msg_mr, uint32_t rpc_id, RemoteInfo &
 GlobalResource::GlobalResource(const ResourceConfig &config)
     : config_(config),
       num_blocks_(config_.block_pool_size / msg_threshold),
-      addr_queue_(num_blocks_),
+      addr_queue_(num_blocks_), 
       ctlmsg_work_(ctlmsg_ctx_) {
   CreateControlID();
   BindLocalDevice();
@@ -96,7 +96,7 @@ GlobalResource::GlobalResource(const ResourceConfig &config)
 }
 
 GlobalResource::~GlobalResource() {
-  for (int i = 0; i < config_.num_threads; i++) {
+  for (int i = 0; i < config_.num_work_threads; i++) {
     auto thread_id = thread_pool_[i].get_id();
     pool_ctx_[i]->stop();
     thread_pool_[i].join();
@@ -113,7 +113,7 @@ GlobalResource::~GlobalResource() {
   }
   wc_poller_.join();
   ctlmsg_ctx_.stop();
-  ctlmsg_handler_.join();
+  for (auto& th : ctlmsg_handler_) th.join();
 
   auto addr_ptr = shared_mr_->addr;
   CHECK(ibv_dereg_mr(shared_mr_) == 0);
@@ -193,11 +193,11 @@ void GlobalResource::CreateSharedQueue() {
 }
 
 void GlobalResource::StartWorkerThread() {
-  thread_pool_.resize(config_.num_threads);
-  pool_ctx_.resize(config_.num_threads);
-  pool_work_.resize(config_.num_threads);
+  thread_pool_.resize(config_.num_work_threads);
+  pool_ctx_.resize(config_.num_work_threads);
+  pool_work_.resize(config_.num_work_threads);
 
-  for (int i = 0; i < config_.num_threads; i++) {
+  for (int i = 0; i < config_.num_work_threads; i++) {
     pool_ctx_[i] = new boost::asio::io_context;
     pool_work_[i] = new boost::asio::io_context::work(*pool_ctx_[i]);
     thread_pool_[i] = std::thread([this, i] { this->pool_ctx_[i]->run(); });
@@ -208,7 +208,12 @@ void GlobalResource::StartWorkerThread() {
   }
 
   // Start the control message handler thread.
-  ctlmsg_handler_ = std::thread([this] { this->ctlmsg_ctx_.run(); });
+  ctlmsg_handler_.resize(config_.num_io_threads);
+  for (int i = 0; i < config_.num_io_threads; i++) {
+    ctlmsg_handler_[i] = std::thread([this] { 
+      this->ctlmsg_ctx_.run(); 
+    });
+  }
 }
 
 void GlobalResource::StartPollerThread() {
@@ -321,7 +326,7 @@ void GlobalResource::ProcessSendWorkCompletion(ibv_wc &wc) {
   uint64_t addr = wc.wr_id;
   if (wc.opcode == IBV_WC_RDMA_WRITE) {
     ibv_mr *mr_ptr = reinterpret_cast<ibv_mr *>(addr);
-    void *mr_addr_ptr = mr_ptr->addr;
+    void *mr_addr_ptr = mr_ptr->addr; 
     CHECK(ibv_dereg_mr(mr_ptr) == 0);
     mi_free(mr_addr_ptr);
   } else {

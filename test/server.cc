@@ -33,15 +33,10 @@ class HeteServiceImpl : public HeteService {
 
 
 int main(int argc, char *argv[]) {
-  int num_cpus = std::thread::hardware_concurrency();
-  std::cout << "Number of CPUs: " << num_cpus << std::endl;
-
   std::string local_ip;
   GetLocalIp(local_ip);
 
-  int num_threads = std::min(std::max(2, num_cpus / 4), 8);
-  std::cout << "There are " << num_threads << " threads in thread pool." << std::endl;
-  lightrpc::ResourceConfig config(local_ip, 1024, num_threads, lightrpc::BUSY_POLLING);
+  lightrpc::ResourceConfig config(local_ip, 1024);
 
   lightrpc::LightServer server(config);
   EchoServiceImpl echo_service;
