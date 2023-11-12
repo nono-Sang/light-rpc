@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-namespace lightrpc {
+namespace fast {
 
 #define LOG_INFO(M, ...) \
   fprintf(stderr, "[INFO] (%s:%d) " M "\n", __FILE__, __LINE__, ##__VA_ARGS__)
@@ -25,4 +25,4 @@ namespace lightrpc {
     }                                      \
   } while (0);
 
-}  // namespace lightrpc
+} // namespace fast

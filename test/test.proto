@@ -4,7 +4,6 @@ option cc_generic_services = true;
 
 message TestRequest {
 	bytes request = 1;
-	int32 sleep_time = 2;
 }
 
 message TestResponse {
@@ -14,11 +13,3 @@ message TestResponse {
 service EchoService {
 	rpc Echo(TestRequest) returns(TestResponse);
 }
-
-service HeteService {
-	rpc Hete(TestRequest) returns(TestResponse);
-}
-
-service FixRepService {
-	rpc FixRep(TestRequest) returns(TestResponse);
-};

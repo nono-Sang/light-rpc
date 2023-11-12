@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package fast;
+
+message Fixed32Bytes {
+  fixed32 val = 1;
+}
+
+message TotalLengthOfMsg {
+  fixed32 total_len = 1;
+}
+
+message LengthOfMetaData {
+  fixed32 metadata_len = 1;
+}
+
+message MetaDataOfRequest {
+  uint32 rpc_id = 1;
+  string service_name = 2;
+  string method_name = 3;
+}
+
+// fixed notify message
+message NotifyMessage {
+  fixed32 total_len = 1;
+  fixed32 remote_key = 2;
+  fixed64 remote_addr = 3;
+}
+
+// fixed authority message
+message AuthorityMessage {
+  fixed32 remote_key = 1;
+  fixed64 remote_addr = 2;
+}
+
+message ResponseHead {
+  fixed32 rpc_id = 1;
+  fixed32 total_len = 2;
+}

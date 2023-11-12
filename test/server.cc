@@ -1,11 +1,9 @@
-#include <cmath>
-#include <iostream>
-#include <thread>
+#include "inc/fast_server.h"
+#include "build/test.pb.h"
+#include "test/utils.h"
 
-#include "light_control.h"
-#include "light_server.h"
-#include "test.pb.h"
-#include "util.h"
+const int res_len = 256;
+std::string res_str(res_len, '#');
 
 class EchoServiceImpl : public EchoService {
  public:
@@ -14,35 +12,21 @@ class EchoServiceImpl : public EchoService {
             TestResponse *response,
             google::protobuf::Closure *done) override {
     response->set_response(request->request());
+    // response->set_response(res_str);
     done->Run();
   }
 };
 
-class HeteServiceImpl : public HeteService {
- public:
-  void Hete(google::protobuf::RpcController *controller,
-            const TestRequest *request,
-            TestResponse *response,
-            google::protobuf::Closure *done) override {
-    int sleep_time = request->sleep_time();
-    sleep(sleep_time);
-    response->set_response(request->request());
-    done->Run();
-  }
-};
-
-
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[])
+{
   std::string local_ip;
   GetLocalIp(local_ip);
 
-  lightrpc::ResourceConfig config(local_ip, 1024);
+  fast::SharedResource shared_res(local_ip, 1024);
+  fast::FastServer server(&shared_res);
 
-  lightrpc::LightServer server(config);
   EchoServiceImpl echo_service;
-  HeteServiceImpl hete_service;
-  server.AddService(lightrpc::SERVER_DOESNT_OWN_SERVICE, &echo_service);
-  server.AddService(lightrpc::SERVER_DOESNT_OWN_SERVICE, &hete_service);
+  server.AddService(fast::SERVER_DOESNT_OWN_SERVICE, &echo_service);
   server.BuildAndStart();
   return 0;
 }

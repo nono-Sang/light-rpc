@@ -1,7 +1,0 @@
-BasedOnStyle: Google
-ColumnLimit: 100
-DerivePointerAlignment: false
-IndentCaseLabels: false
-PointerAlignment: Right
-BinPackArguments: false
-BinPackParameters: false
