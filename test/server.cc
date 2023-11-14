@@ -2,7 +2,7 @@
 #include "build/test.pb.h"
 #include "test/utils.h"
 
-const int res_len = 256;
+const int res_len = 64;
 std::string res_str(res_len, '#');
 
 class EchoServiceImpl : public EchoService {

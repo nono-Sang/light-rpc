@@ -9,14 +9,24 @@ static const uint32_t max_num_sge = 1;
 
 namespace fast {
 
-const uint64_t UniqueResource::default_blk_pool_size = msg_threshold * 64;
+const uint64_t UniqueResource::default_blk_pool_size = msg_threshold * 32;
+const int UniqueResource::default_max_local_mr = max_num_cache_mr;
 
-UniqueResource::UniqueResource(std::string local_ip, int local_port, uint64_t blk_pool_size)
-  : FastResource(local_ip, local_port, blk_pool_size) {
-  this->CreateRDMAResource();
+UniqueResource::UniqueResource(std::string local_ip, int local_port, 
+                               int blk_pool_size, int max_local_mr)
+  : FastResource(local_ip, local_port), 
+    block_pool_size_(blk_pool_size), 
+    max_local_mr_(max_local_mr) {
+  CreateRDMAResource();
+  CreateBlockPool();
+  large_mr_cache_ = std::make_unique<LocalMRCache>(max_local_mr_);
 }
 
 UniqueResource::~UniqueResource() {
+  void* pool_addr = block_pool_mr_->addr;
+  CHECK(ibv_dereg_mr(block_pool_mr_) == 0);
+  free(pool_addr);
+
   CHECK(ibv_destroy_qp(cm_id_->qp) == 0);
   CHECK(ibv_destroy_cq(cm_id_->recv_cq) == 0);
   CHECK(ibv_destroy_cq(cm_id_->send_cq) == 0);
@@ -66,6 +76,23 @@ void UniqueResource::CreateRDMAResource() {
   qp_attr.cap.max_send_sge = max_num_sge;
   qp_attr.cap.max_inline_data = max_inline_data;
   CHECK(rdma_create_qp(cm_id_, cm_id_->pd, &qp_attr) == 0);
+}
+
+void UniqueResource::CreateBlockPool() {
+  void* pool_addr = malloc(block_pool_size_);
+  CHECK(pool_addr != nullptr);
+  block_pool_mr_ = ibv_reg_mr(
+    cm_id_->pd, 
+    pool_addr, 
+    block_pool_size_, 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
+  );
+  CHECK(block_pool_mr_ != nullptr);
+  uint64_t num_blocks = block_pool_size_ / msg_threshold;
+  uint64_t uint64_addr = reinterpret_cast<uint64_t>(pool_addr);
+  for (int i = 0; i < num_blocks; i++) {
+    block_list_.push_back(uint64_addr + i * msg_threshold);
+  }
 }
 
 } // namespace fast

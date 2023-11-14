@@ -4,16 +4,10 @@
 #include "inc/fast_verbs.h"
 #include "build/fast_impl.pb.h"
 
-static const int timeout_in_ms = 1000;  // ms
-
 namespace fast {
 
-const int FastChannel::default_num_cache_mr = 10;
-
 FastChannel::FastChannel(UniqueResource* unique_rsc, std::string dest_ip, int dest_port)
-  : unique_rsc_(unique_rsc), safe_id_(1) {
-  this->safe_mr_cache_ = std::make_unique<SafeMRCache>(default_num_cache_mr);
-
+  : unique_rsc_(unique_rsc), rpc_id_(1) {
   // Resolve remote address.
   sockaddr_in dest_addr;
   memset(&dest_addr, 0, sizeof(dest_addr));
@@ -60,7 +54,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
                              const google::protobuf::Message* request,
                              google::protobuf::Message* response,
                              google::protobuf::Closure* done) {
-  uint32_t rpc_id = safe_id_.GetAndIncOne();
+  uint32_t rpc_id = rpc_id_++;
 
   // message layout: |1.total length|2.metadata length|3.metadata|4.payload|
   uint32_t part4_len = request->ByteSizeLong();
@@ -93,7 +87,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
   unique_rsc_->ObtainOneBlock(block_addr);
   unique_rsc_->PostOneRecvRequest(block_addr);
 
-  ibv_qp* local_qp = unique_rsc_->GetQueuePair();
+  ibv_qp* local_qp = unique_rsc_->GetConnMgrID()->qp;
   uint32_t local_key = unique_rsc_->GetLocalKey();
   uint32_t remote_key = unique_rsc_->GetRemoteKey();
 
@@ -113,7 +107,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
                      FAST_SmallMessage, 
                      msg_addr, 
                      total_length, 
-                     unique_rsc_->GetLocalKey());
+                     local_key);
   } else {
     // Obtain one block for receiving authority message.
     uint64_t auth_addr = 0;
@@ -137,7 +131,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
                       fixed_noti_bytes);
     
     // Step-2: Prepare a large MR and perform serialization.
-    ibv_mr* large_send_mr = safe_mr_cache_->SafeGetAndEraseMR(total_length + 1);
+    ibv_mr* large_send_mr = unique_rsc_->GetOneMRFromCache(total_length + 1);
     if (large_send_mr == nullptr) {
       large_send_mr = unique_rsc_->AllocAndRegisterMR(total_length + 1);
     }
@@ -166,7 +160,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
   /// NOTE: Try to poll send CQEs.
   this->TryToPollSendWC();
 
-  auto recv_cq = unique_rsc_->GetRecvCQ();
+  auto recv_cq = unique_rsc_->GetConnMgrID()->recv_cq;
   ibv_wc recv_wc;
   memset(&recv_wc, 0, sizeof(recv_wc));
   while (true) {
@@ -190,7 +184,7 @@ void FastChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
 }
 
 void FastChannel::TryToPollSendWC() {
-  ibv_cq* send_cq = unique_rsc_->GetSendCQ();
+  ibv_cq* send_cq = unique_rsc_->GetConnMgrID()->send_cq;
   ibv_wc send_wc;
   memset(&send_wc, 0, sizeof(send_wc));
   while (true) {
@@ -204,17 +198,18 @@ void FastChannel::TryToPollSendWC() {
 }
 
 void FastChannel::ProcessSendWorkCompletion(ibv_wc& send_wc) {
-  if (send_wc.opcode == IBV_WC_RDMA_WRITE && send_wc.wr_id) {
+  if (send_wc.wr_id == 0) return;
+  if (send_wc.opcode == IBV_WC_RDMA_WRITE) {
     ibv_mr* large_mr = reinterpret_cast<ibv_mr*>(send_wc.wr_id);
-    safe_mr_cache_->SafePutMR(large_mr);
+    unique_rsc_->PutOneMRIntoCache(large_mr);
   } else {
     // The opcode is IBV_WC_SEND.
-    if (send_wc.wr_id) unique_rsc_->ReturnOneBlock(send_wc.wr_id);
+    unique_rsc_->ReturnOneBlock(send_wc.wr_id);
   }
 }
 
 ibv_mr* FastChannel::ProcessNotifyMessage(uint64_t block_addr) {
-  ibv_qp* local_qp = unique_rsc_->GetQueuePair();
+  ibv_qp* local_qp = unique_rsc_->GetConnMgrID()->qp;
 
   // Step-1: Get the notify message.
   char* block_buf = reinterpret_cast<char*>(block_addr);
@@ -225,7 +220,7 @@ ibv_mr* FastChannel::ProcessNotifyMessage(uint64_t block_addr) {
   uint32_t total_length = notify_msg.total_len();
 
   // Step-2: Prepare a large MR.
-  ibv_mr* large_recv_mr = safe_mr_cache_->SafeGetAndEraseMR(total_length + 1);
+  ibv_mr* large_recv_mr = unique_rsc_->GetOneMRFromCache(total_length + 1);
   if (large_recv_mr == nullptr) {
     large_recv_mr = unique_rsc_->AllocAndRegisterMR(total_length + 1);
   }
@@ -283,7 +278,7 @@ void FastChannel::ParseAndProcessResponse(void* addr,
     uint64_t block_addr = reinterpret_cast<uint64_t>(addr);
     unique_rsc_->ReturnOneBlock(block_addr);
   } else {
-    safe_mr_cache_->SafePutMR(reinterpret_cast<ibv_mr*>(addr));
+    unique_rsc_->PutOneMRIntoCache(reinterpret_cast<ibv_mr*>(addr));
   }
 }
   

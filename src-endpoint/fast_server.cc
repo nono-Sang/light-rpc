@@ -4,28 +4,20 @@
 #include "inc/fast_verbs.h"
 #include "build/fast_impl.pb.h"
 
-static const int num_cpus = std::thread::hardware_concurrency();
-static const int listen_backlog = 200;
-
 namespace fast {
 
-const int FastServer::default_num_poll_th = std::max(1, num_cpus / 8);
-const int FastServer::default_num_work_th = num_cpus;
-const int FastServer::default_num_cache_mr = 2 * default_num_work_th;
+const int FastServer::default_num_poll_th = std::max(1U, std::thread::hardware_concurrency() / 8U);
 
-FastServer::FastServer(SharedResource* shared_rsc, int num_poll_th, int num_work_th)
+FastServer::FastServer(SharedResource* shared_rsc, int num_poll_th)
   : shared_rsc_(shared_rsc), 
     num_pollers_(num_poll_th), 
-    stop_flag_(false),  
-    io_ctx_pool_(num_work_th) {
+    stop_flag_(false) {
   for (int i = 0; i < num_pollers_; ++i) {
     this->poller_pool_.emplace_back([this] {
       this->BusyPollRecvWC();
     });
   }
-  this->safe_mr_cache_ = std::make_unique<SafeMRCache>(default_num_cache_mr);
   this->conn_id_map_ = std::make_unique<SafeHashMap<rdma_cm_id*>>();
-
   CHECK(rdma_listen(shared_rsc_->GetConnMgrID(), listen_backlog) == 0);
   LOG_INFO("Start listening on port %d", shared_rsc_->GetLocalPort());
 }
@@ -79,7 +71,7 @@ void FastServer::BuildAndStart() {
 
 void FastServer::ProcessConnectRequest(rdma_cm_id* conn_id) {
   // Create and record queue pair.
-  shared_rsc_->CreateQueuePair(conn_id);
+  shared_rsc_->CreateNewQueuePair(conn_id);
   conn_id_map_->SafeInsert(conn_id->qp->qp_num, conn_id);
 
   // Accept the connection request.
@@ -97,7 +89,7 @@ void FastServer::ProcessDisconnect(rdma_cm_id* conn_id) {
 }
 
 void FastServer::BusyPollRecvWC() {
-  auto recv_cq = shared_rsc_->GetRecvCQ();
+  auto recv_cq = shared_rsc_->GetConnMgrID()->recv_cq;
   ibv_wc recv_wc;
   memset(&recv_wc, 0, sizeof(recv_wc));
   while (true) {
@@ -119,11 +111,11 @@ void FastServer::ProcessRecvWorkCompletion(ibv_wc& recv_wc) {
   rdma_cm_id* conn_id = conn_id_map_->SafeGet(recv_wc.qp_num);
   uint64_t recv_addr = recv_wc.wr_id;
 
-  boost::asio::io_context* io_ctx = io_ctx_pool_.GetIOContext();
+  boost::asio::io_context* io_ctx = shared_rsc_->GetIOContext();
 
   /// NOTE: Post one recv WR for receiving next request.
   uint64_t block_addr = 0;
-  shared_rsc_->ObtainOneBlock(block_addr);
+  shared_rsc_->GetOneBlockFromGlobalPool(block_addr);
   shared_rsc_->PostOneRecvRequest(block_addr);
 
   if (imm_data == FAST_SmallMessage) {
@@ -153,26 +145,29 @@ void FastServer::TryToPollSendWC(rdma_cm_id* conn_id) {
 }
 
 void FastServer::ProcessSendWorkCompletion(ibv_wc& send_wc) {
-  if (send_wc.opcode == IBV_WC_RDMA_WRITE && send_wc.wr_id) {
+  if (send_wc.wr_id == 0) return;
+  int th_idx = shared_rsc_->GetThreadIndex(std::this_thread::get_id());
+  if (send_wc.opcode == IBV_WC_RDMA_WRITE) {
     ibv_mr* large_mr = reinterpret_cast<ibv_mr*>(send_wc.wr_id);
-    safe_mr_cache_->SafePutMR(large_mr);
+    shared_rsc_->PutOneMRIntoCache(th_idx, large_mr);
   } else {
     // The opcode is IBV_WC_SEND.
-    if (send_wc.wr_id) shared_rsc_->ReturnOneBlock(send_wc.wr_id);
+    shared_rsc_->PutOneBlockIntoLocalCache(th_idx, send_wc.wr_id);
   }
 }
 
 void FastServer::ProcessNotifyMessage(rdma_cm_id* conn_id, uint64_t block_addr) {
+  int th_idx = shared_rsc_->GetThreadIndex(std::this_thread::get_id());
   // Step-1: Get the notify message.
   char* block_buf = reinterpret_cast<char*>(block_addr);
   NotifyMessage notify_msg;
   CHECK(notify_msg.ParseFromArray(block_buf, fixed_noti_bytes));
   // Return the block which stores notify message.
-  shared_rsc_->ReturnOneBlock(block_addr);
+  shared_rsc_->PutOneBlockIntoLocalCache(th_idx, block_addr);
   uint32_t total_length = notify_msg.total_len();
 
   // Step-2: Prepare a large MR.
-  ibv_mr* large_recv_mr = safe_mr_cache_->SafeGetAndEraseMR(total_length + 1);
+  ibv_mr* large_recv_mr = shared_rsc_->GetOneMRFromCache(th_idx, total_length + 1);
   if (large_recv_mr == nullptr) {
     large_recv_mr = shared_rsc_->AllocAndRegisterMR(total_length + 1);
   }
@@ -207,6 +202,7 @@ void FastServer::ProcessNotifyMessage(rdma_cm_id* conn_id, uint64_t block_addr) 
 }
 
 void FastServer::ParseAndProcessRequest(rdma_cm_id* conn_id, void* addr, bool small_msg) {
+  int th_idx = shared_rsc_->GetThreadIndex(std::this_thread::get_id());
   char* msg_buf = nullptr;
   if (small_msg) {
     msg_buf = reinterpret_cast<char*>(addr);
@@ -244,9 +240,9 @@ void FastServer::ParseAndProcessRequest(rdma_cm_id* conn_id, void* addr, bool sm
   /// NOTE: Return the occupied resources.
   if (small_msg) {
     uint64_t block_addr = reinterpret_cast<uint64_t>(addr);
-    shared_rsc_->ReturnOneBlock(block_addr);
+    shared_rsc_->PutOneBlockIntoLocalCache(th_idx, block_addr);
   } else {
-    safe_mr_cache_->SafePutMR(reinterpret_cast<ibv_mr*>(addr));
+    shared_rsc_->PutOneMRIntoCache(th_idx, reinterpret_cast<ibv_mr*>(addr));
   }
 
   CallBackArgs args;
@@ -260,6 +256,7 @@ void FastServer::ParseAndProcessRequest(rdma_cm_id* conn_id, void* addr, bool sm
 }
 
 void FastServer::ReturnRPCResponse(CallBackArgs args) {
+  int th_idx = shared_rsc_->GetThreadIndex(std::this_thread::get_id());
   // Use RAII mechanism to release resources.
   std::unique_ptr<google::protobuf::Message> request_guard(args.request);
   std::unique_ptr<google::protobuf::Message> response_guard(args.response);
@@ -292,7 +289,7 @@ void FastServer::ReturnRPCResponse(CallBackArgs args) {
                       total_length);
   } else if (total_length <= msg_threshold) {
     uint64_t msg_addr = 0;
-    shared_rsc_->ObtainOneBlock(msg_addr);
+    shared_rsc_->GetOneBlockFromLocalCache(th_idx, msg_addr);
     serialize_func(reinterpret_cast<char*>(msg_addr));
     SendSmallMessage(args.conn_id->qp, 
                      FAST_SmallMessage, 
@@ -302,7 +299,7 @@ void FastServer::ReturnRPCResponse(CallBackArgs args) {
   } else {
     // Obtain one block for receiving authority message.
     uint64_t auth_addr = 0;
-    shared_rsc_->ObtainOneBlock(auth_addr);
+    shared_rsc_->GetOneBlockFromLocalCache(th_idx, auth_addr);
     char* auth_buf = reinterpret_cast<char*>(auth_addr);
     // [Receiver]: set the flag byte to '0'.
     memset(auth_buf + fixed_auth_bytes, '0', 1);
@@ -322,7 +319,7 @@ void FastServer::ReturnRPCResponse(CallBackArgs args) {
                       fixed_noti_bytes);
     
     // Step-2: Prepare a large MR and perform serialization.
-    ibv_mr* large_send_mr = safe_mr_cache_->SafeGetAndEraseMR(total_length + 1);
+    ibv_mr* large_send_mr = shared_rsc_->GetOneMRFromCache(th_idx, total_length + 1);
     if (large_send_mr == nullptr) {
       large_send_mr = shared_rsc_->AllocAndRegisterMR(total_length + 1);
     }
@@ -345,7 +342,7 @@ void FastServer::ReturnRPCResponse(CallBackArgs args) {
                       authority_msg.remote_addr());
     
     // Return the block which stores authority message
-    shared_rsc_->ReturnOneBlock(auth_addr);
+    shared_rsc_->PutOneBlockIntoLocalCache(th_idx, auth_addr);
   }
 
   /// NOTE: Try to poll send CQEs.

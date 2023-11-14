@@ -29,9 +29,7 @@ struct CallBackArgs {
 
 class FastServer {
 public:
-  FastServer(SharedResource* shared_rsc, 
-             int num_poll_th = default_num_poll_th, 
-             int num_work_th = default_num_work_th);
+  FastServer(SharedResource* shared_rsc, int num_poll_th = default_num_poll_th);
   ~FastServer();
   void AddService(ServiceOwnership ownership, google::protobuf::Service* service);
   void BuildAndStart();
@@ -42,9 +40,7 @@ private:
   int num_pollers_;
   volatile std::atomic<bool> stop_flag_;
   std::vector<std::thread> poller_pool_;
-  IOContextPool io_ctx_pool_;
 
-  std::unique_ptr<SafeMRCache> safe_mr_cache_;
   std::unique_ptr<SafeHashMap<rdma_cm_id*>> conn_id_map_;  // key is qp number
   std::unordered_map<std::string, ServiceInfo> service_map_;  // key is service name
 
@@ -60,8 +56,6 @@ private:
   void ReturnRPCResponse(CallBackArgs args);
 
   static const int default_num_poll_th;
-  static const int default_num_work_th;
-  static const int default_num_cache_mr;
 };
   
 } // namespace fast

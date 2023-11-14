@@ -2,26 +2,12 @@
 
 #include "inc/fast_log.h"
 
-#include <boost/asio.hpp>
 #include <rdma/rdma_cma.h>
-#include <mutex>
-#include <thread>
 #include <list>
-#include <vector>
 #include <unordered_map>
+#include <mutex>
 
 namespace fast {
-
-class SafeID {
-public:
-  SafeID(int init): val_(init) {}
-  uint32_t GetAndIncOne();
-
-private:
-  uint32_t val_;
-  std::mutex mtx_;
-};
-
 
 // vType should be pointer type or value type.
 template<typename vType>
@@ -62,32 +48,47 @@ private:
 };
 
 
-class SafeMRCache {
+class LocalMRCache {
 public:
-  SafeMRCache(int max_mr_num);
-  ~SafeMRCache();
-  ibv_mr* SafeGetAndEraseMR(uint32_t goal_size);
-  void SafePutMR(ibv_mr* mr);
+  LocalMRCache(int capacity): capacity_(capacity), size_(0) {}
+
+  ~LocalMRCache() {
+    for (auto it = mr_list_.begin(); it != mr_list_.end(); ++it) {
+      void* mr_addr = (*it)->addr;
+      CHECK(ibv_dereg_mr(*it) == 0);
+      free(mr_addr);
+    }
+  }
+
+  void PushOneMRIntoCache(ibv_mr* mr) {
+    mr_list_.push_front(mr);
+    if (++size_ > capacity_) {
+      ibv_mr* last_mr = mr_list_.back();
+      void* last_mr_addr = last_mr->addr;
+      CHECK(ibv_dereg_mr(last_mr) == 0);
+      free(last_mr_addr);
+      mr_list_.pop_back();
+      --size_;
+    }
+  }
+
+  ibv_mr* GetOneMRFromCache(uint32_t goal_size) {
+    ibv_mr* ans = nullptr;
+    for (auto it = mr_list_.begin(); it != mr_list_.end(); ++it) {
+      if ((*it)->length >= goal_size) {
+        ans = *it;
+        mr_list_.erase(it);
+        --size_;
+        break;
+      }
+    }
+    return ans;
+  }
 
 private:
-  int max_mr_num_;
-  int count_;
+  int capacity_;
+  int size_;
   std::list<ibv_mr*> mr_list_;
-  std::mutex mtx_;
-};
-
-
-class IOContextPool {
-public:
-  IOContextPool(int num_io_context);
-  ~IOContextPool();
-  boost::asio::io_context* GetIOContext();
-
-private:
-  int num_io_context_;
-  std::atomic<uint64_t> curr_index_;
-  std::vector<std::thread> threads_vec_;
-  std::vector<std::unique_ptr<boost::asio::io_context>> io_ctx_vec_;
 };
 
 } // namespace fast

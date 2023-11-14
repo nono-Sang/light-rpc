@@ -26,17 +26,12 @@ public:
 
 private:
   UniqueResource* unique_rsc_;
-  SafeID safe_id_;
-  std::unique_ptr<SafeMRCache> safe_mr_cache_;
+  uint32_t rpc_id_;  // 1
 
   void TryToPollSendWC();
   void ProcessSendWorkCompletion(ibv_wc& send_wc);
-
   ibv_mr* ProcessNotifyMessage(uint64_t block_addr);
-  void ParseAndProcessResponse(void* addr, bool small_msg, 
-                               google::protobuf::Message* response);
-
-  static const int default_num_cache_mr;
+  void ParseAndProcessResponse(void* addr, bool small_msg, google::protobuf::Message* response);
 };
 
 } // namespace fast
